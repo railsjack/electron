@@ -26,6 +26,38 @@ const uninterceptProtocol = promisify(protocol.uninterceptProtocol)
 
 const text = 'valar morghulis'
 const protocolName = 'sp'
+=======
+import { expect } from 'chai';
+import { protocol, webContents, WebContents, session, BrowserWindow, ipcMain } from 'electron/main';
+import { AddressInfo } from 'net';
+import * as ChildProcess from 'child_process';
+import * as path from 'path';
+import * as http from 'http';
+import * as fs from 'fs';
+import * as qs from 'querystring';
+import * as stream from 'stream';
+import { EventEmitter } from 'events';
+import { closeWindow } from './window-helpers';
+import { emittedOnce } from './events-helpers';
+import { WebmGenerator } from './video-helpers';
+
+const fixturesPath = path.resolve(__dirname, '..', 'spec', 'fixtures');
+
+const registerStringProtocol = protocol.registerStringProtocol;
+const registerBufferProtocol = protocol.registerBufferProtocol;
+const registerFileProtocol = protocol.registerFileProtocol;
+const registerHttpProtocol = protocol.registerHttpProtocol;
+const registerStreamProtocol = protocol.registerStreamProtocol;
+const interceptStringProtocol = protocol.interceptStringProtocol;
+const interceptBufferProtocol = protocol.interceptBufferProtocol;
+const interceptHttpProtocol = protocol.interceptHttpProtocol;
+const interceptStreamProtocol = protocol.interceptStreamProtocol;
+const unregisterProtocol = protocol.unregisterProtocol;
+const uninterceptProtocol = protocol.uninterceptProtocol;
+
+const text = 'valar morghulis';
+const protocolName = 'sp';
+>>>>>>> 81d09bea4... fix: correctly handle nexttick scheduling in stream reads (#24022)
 const postData = {
   name: 'post test',
   type: 'string'
@@ -406,38 +438,94 @@ describe('protocol module', () => {
           statusCode: 200,
           headers: { 'Content-Type': 'text/plain' },
           data: getStream(1024 * 1024, Buffer.alloc(1024 * 1024 * 2)).pipe(dumbPassthrough())
-        })
-      })
-      const r = await ajax(protocolName + '://fake-host')
-      expect(r.data).to.have.lengthOf(1024 * 1024 * 2)
-    })
-  })
+        });
+      });
+      const r = await ajax(protocolName + '://fake-host');
+      expect(r.data).to.have.lengthOf(1024 * 1024 * 2);
+    });
 
-  describe('protocol.isProtocolHandled', () => {
-    it('returns true for built-in protocols', async () => {
-      for (const p of ['about', 'file', 'http', 'https']) {
-        const handled = await protocol.isProtocolHandled(p)
-        expect(handled).to.be.true(`${p}: is handled`)
+    it('can handle next-tick scheduling during read calls', async () => {
+      const events = new EventEmitter();
+      function createStream () {
+        const buffers = [
+          Buffer.alloc(65536),
+          Buffer.alloc(65537),
+          Buffer.alloc(39156)
+        ];
+        const e = new stream.Readable({ highWaterMark: 0 });
+        e.push(buffers.shift());
+        e._read = function () {
+          process.nextTick(() => this.push(buffers.shift() || null));
+        };
+        e.on('end', function () {
+          events.emit('end');
+        });
+        return e;
       }
-    })
+      registerStreamProtocol(protocolName, (request, callback) => {
+        callback({
+          statusCode: 200,
+          headers: { 'Content-Type': 'text/plain' },
+          data: createStream()
+        });
+      });
+      const hasEndedPromise = emittedOnce(events, 'end');
+      ajax(protocolName + '://fake-host');
+      await hasEndedPromise;
+    });
 
-    it('returns false when scheme is not registered', async () => {
-      const result = await protocol.isProtocolHandled('no-exist')
-      expect(result).to.be.false('no-exist: is handled')
-    })
+    it('can handle next-tick scheduling during read calls', async () => {
+      const events = new EventEmitter();
+      function createStream () {
+        const buffers = [
+          Buffer.alloc(65536),
+          Buffer.alloc(65537),
+          Buffer.alloc(39156)
+        ];
+        const e = new stream.Readable({ highWaterMark: 0 });
+        e.push(buffers.shift());
+        e._read = function () {
+          process.nextTick(() => this.push(buffers.shift() || null));
+        };
+        e.on('end', function () {
+          events.emit('end');
+        });
+        return e;
+      }
+      registerStreamProtocol(protocolName, (request, callback) => {
+        callback({
+          statusCode: 200,
+          headers: { 'Content-Type': 'text/plain' },
+          data: createStream()
+        });
+      });
+      const hasEndedPromise = emittedOnce(events, 'end');
+      ajax(protocolName + '://fake-host');
+      await hasEndedPromise;
+    });
+  });
 
-    it('returns true for custom protocol', async () => {
-      await registerStringProtocol(protocolName, (request, callback) => callback())
-      const result = await protocol.isProtocolHandled(protocolName)
-      expect(result).to.be.true('custom protocol is handled')
-    })
+  describe('protocol.isProtocolRegistered', () => {
+    it('returns false when scheme is not registered', () => {
+      const result = protocol.isProtocolRegistered('no-exist');
+      expect(result).to.be.false('no-exist: is handled');
+    });
 
-    it('returns true for intercepted protocol', async () => {
-      await interceptStringProtocol('http', (request, callback) => callback())
-      const result = await protocol.isProtocolHandled('http')
-      expect(result).to.be.true('intercepted protocol is handled')
-    })
-  })
+    it('returns true for custom protocol', () => {
+      registerStringProtocol(protocolName, (request, callback) => callback(''));
+      const result = protocol.isProtocolRegistered(protocolName);
+      expect(result).to.be.true('custom protocol is handled');
+    });
+  });
+
+  describe('protocol.isProtocolIntercepted', () => {
+    it('returns true for intercepted protocol', () => {
+      interceptStringProtocol('http', (request, callback) => callback(''));
+      const result = protocol.isProtocolIntercepted('http');
+      expect(result).to.be.true('intercepted protocol is handled');
+    });
+  });
+>>>>>>> 81d09bea4... fix: correctly handle nexttick scheduling in stream reads (#24022)
 
   describe('protocol.intercept(Any)Protocol', () => {
     it('throws error when scheme is already intercepted', (done) => {
