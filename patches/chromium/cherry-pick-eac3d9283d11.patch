@@ -1,0 +1,269 @@
+From eac3d9283d11737740d09b308ef05a7343ca3057 Mon Sep 17 00:00:00 2001
+From: Martin Kreichgauer <martinkr@google.com>
+Date: Wed, 3 Jun 2020 21:07:08 +0000
+Subject: [PATCH] Revert "fido: add FidoDiscoveryFactory::ResetRequestState()"
+
+This reverts commit 9f151687295d2547bc3d7c1542b80505552f0f87.
+
+Reason for revert: The original change makes an invalid assumptions
+about the lifetime of FidoDiscoveryFactory (crbug/1087158). Instances of
+FidoDiscoveryFactory generally belong to the
+AuthenticatorRequestClientDelegate and as such should outlive the
+WebAuthn request. As an exception, instances obtained via
+AuthenticatorEnvironmentImpl::GetDiscoveryFactoryOverride() may be
+unregistered and freed before the request finishes.
+
+This revert is safe because the caBLE data reset by ResetRequestState
+(a) only gets set in the first place if the
+WebAuthenticationPhoneSupport flag is on (which is default-off); and (b)
+gets set anew for every single request, so it will never be reused
+across requests.
+
+Bug: 1087158
+
+Original change's description:
+> fido: add FidoDiscoveryFactory::ResetRequestState()
+>
+> FidoDiscoveryFactory instances generally outlive a WebAuthn request, but
+> some of the state is specific to a single request (caBLE pairing and QR
+> code generation keys). This is currently not an issue, because
+> AuthenticatorCommon explicitly resets all that state at the beginning of
+> the request. But I worry that we accidentally break that and leak state
+> between requests. To mitigate, introduce an explicit ResetRequestState
+> function and call it in AuthenticatorCommon::Cleanup().
+>
+> Change-Id: I8333a3b14d189d7977cde17cbfe44b4b8dcf6ee2
+> Reviewed-on:
+> https://chromium-review.googlesource.com/c/chromium/src/+/1793792
+> Commit-Queue: Martin Kreichgauer <martinkr@chromium.org>
+> Reviewed-by: Nina Satragno <nsatragno@chromium.org>
+> Reviewed-by: Adam Langley <agl@chromium.org>
+> Cr-Commit-Position: refs/heads/master@{#696593}
+
+Change-Id: I3b1ea46b9b1d5912cbc7ab9a82851e5132335ea8
+Reviewed-on: https://chromium-review.googlesource.com/c/chromium/src/+/2228136
+Reviewed-by: Nina Satragno <nsatragno@chromium.org>
+Reviewed-by: Adam Langley <agl@chromium.org>
+Commit-Queue: Martin Kreichgauer <martinkr@google.com>
+Cr-Commit-Position: refs/heads/master@{#774784}
+---
+ .../browser/webauth/authenticator_common.cc   | 35 +++++++------------
+ .../browser/webauth/authenticator_common.h    |  1 -
+ device/fido/fido_discovery_factory.cc         | 22 ++++--------
+ device/fido/fido_discovery_factory.h          | 30 +++-------------
+ 4 files changed, 23 insertions(+), 65 deletions(-)
+
+diff --git a/content/browser/webauth/authenticator_common.cc b/content/browser/webauth/authenticator_common.cc
+index 1aff511e32e54..6a5570ccd99bb 100644
+--- a/content/browser/webauth/authenticator_common.cc
++++ b/content/browser/webauth/authenticator_common.cc
+@@ -540,13 +540,12 @@ AuthenticatorCommon::CreateRequestDelegate() {
+ 
+ void AuthenticatorCommon::StartMakeCredentialRequest(
+     bool allow_skipping_pin_touch) {
+-  discovery_factory_ =
++  device::FidoDiscoveryFactory* discovery_factory =
+       AuthenticatorEnvironmentImpl::GetInstance()->GetDiscoveryFactoryOverride(
+           static_cast<RenderFrameHostImpl*>(render_frame_host_)
+               ->frame_tree_node());
+-  if (!discovery_factory_) {
+-    discovery_factory_ = request_delegate_->GetDiscoveryFactory();
+-  }
++  if (!discovery_factory)
++    discovery_factory = request_delegate_->GetDiscoveryFactory();
+ 
+   if (base::FeatureList::IsEnabled(device::kWebAuthPhoneSupport)) {
+     std::vector<device::CableDiscoveryData> cable_pairings =
+@@ -558,15 +557,15 @@ void AuthenticatorCommon::StartMakeCredentialRequest(
+     if (request_delegate_->SetCableTransportInfo(
+             /*cable_extension_provided=*/false, have_paired_phones,
+             qr_generator_key)) {
+-      discovery_factory_->set_cable_data(cable_pairings,
+-                                         std::move(qr_generator_key));
++      discovery_factory->set_cable_data(cable_pairings,
++                                        std::move(qr_generator_key));
+     }
+   }
+ 
+   make_credential_options_->allow_skipping_pin_touch = allow_skipping_pin_touch;
+ 
+   request_ = std::make_unique<device::MakeCredentialRequestHandler>(
+-      discovery_factory_,
++      discovery_factory,
+       GetAvailableTransports(render_frame_host_, request_delegate_.get(),
+                              caller_origin_),
+       *ctap_make_credential_request_, *authenticator_selection_criteria_,
+@@ -595,13 +594,12 @@ void AuthenticatorCommon::StartMakeCredentialRequest(
+ 
+ void AuthenticatorCommon::StartGetAssertionRequest(
+     bool allow_skipping_pin_touch) {
+-  discovery_factory_ =
++  device::FidoDiscoveryFactory* discovery_factory =
+       AuthenticatorEnvironmentImpl::GetInstance()->GetDiscoveryFactoryOverride(
+           static_cast<RenderFrameHostImpl*>(render_frame_host_)
+               ->frame_tree_node());
+-  if (!discovery_factory_) {
+-    discovery_factory_ = request_delegate_->GetDiscoveryFactory();
+-  }
++  if (!discovery_factory)
++    discovery_factory = request_delegate_->GetDiscoveryFactory();
+ 
+   std::vector<device::CableDiscoveryData> cable_pairings;
+   bool have_cable_extension = false;
+@@ -625,12 +623,12 @@ void AuthenticatorCommon::StartGetAssertionRequest(
+   if ((!cable_pairings.empty() || qr_generator_key.has_value()) &&
+       request_delegate_->SetCableTransportInfo(
+           have_cable_extension, have_paired_phones, qr_generator_key)) {
+-    discovery_factory_->set_cable_data(std::move(cable_pairings),
+-                                       std::move(qr_generator_key));
++    discovery_factory->set_cable_data(std::move(cable_pairings),
++                                      std::move(qr_generator_key));
+   }
+ 
+   request_ = std::make_unique<device::GetAssertionRequestHandler>(
+-      discovery_factory_,
++      discovery_factory,
+       GetAvailableTransports(render_frame_host_, request_delegate_.get(),
+                              caller_origin_),
+       *ctap_get_assertion_request_, allow_skipping_pin_touch,
+@@ -1487,15 +1485,6 @@ void AuthenticatorCommon::Cleanup() {
+ 
+   timer_->Stop();
+   request_.reset();
+-  if (discovery_factory_) {
+-    // The FidoDiscoveryFactory instance may have been obtained via
+-    // AuthenticatorEnvironmentImpl::GetDiscoveryFactoryOverride() (in unit
+-    // tests or when WebDriver injected a virtual authenticator), in which case
+-    // it may be long-lived and handle more than one request. Hence, we need to
+-    // reset all per-request state before deleting its pointer.
+-    discovery_factory_->ResetRequestState();
+-    discovery_factory_ = nullptr;
+-  }
+   ctap_make_credential_request_.reset();
+   make_credential_options_.reset();
+   request_delegate_.reset();
+diff --git a/content/browser/webauth/authenticator_common.h b/content/browser/webauth/authenticator_common.h
+index 61631ac86a37a..a15c113669c53 100644
+--- a/content/browser/webauth/authenticator_common.h
++++ b/content/browser/webauth/authenticator_common.h
+@@ -169,7 +169,6 @@ class CONTENT_EXPORT AuthenticatorCommon {
+   BrowserContext* browser_context() const;
+ 
+   RenderFrameHost* const render_frame_host_;
+-  device::FidoDiscoveryFactory* discovery_factory_ = nullptr;
+   std::unique_ptr<device::FidoRequestHandlerBase> request_;
+   blink::mojom::Authenticator::MakeCredentialCallback
+       make_credential_response_callback_;
+diff --git a/device/fido/fido_discovery_factory.cc b/device/fido/fido_discovery_factory.cc
+index 120c5ac680e7d..a2e4e418e1fc5 100644
+--- a/device/fido/fido_discovery_factory.cc
++++ b/device/fido/fido_discovery_factory.cc
+@@ -47,10 +47,6 @@ std::unique_ptr<FidoDiscoveryBase> CreateUsbFidoDiscovery() {
+ FidoDiscoveryFactory::FidoDiscoveryFactory() = default;
+ FidoDiscoveryFactory::~FidoDiscoveryFactory() = default;
+ 
+-void FidoDiscoveryFactory::ResetRequestState() {
+-  request_state_ = {};
+-}
+-
+ std::unique_ptr<FidoDiscoveryBase> FidoDiscoveryFactory::Create(
+     FidoTransportProtocol transport) {
+   switch (transport) {
+@@ -59,13 +55,10 @@ std::unique_ptr<FidoDiscoveryBase> FidoDiscoveryFactory::Create(
+     case FidoTransportProtocol::kBluetoothLowEnergy:
+       return nullptr;
+     case FidoTransportProtocol::kCloudAssistedBluetoothLowEnergy:
+-      if (request_state_.cable_data_.has_value() ||
+-          request_state_.qr_generator_key_.has_value()) {
++      if (cable_data_.has_value() || qr_generator_key_.has_value()) {
+         return std::make_unique<FidoCableDiscovery>(
+-            request_state_.cable_data_.value_or(
+-                std::vector<CableDiscoveryData>()),
+-            request_state_.qr_generator_key_,
+-            request_state_.cable_pairing_callback_);
++            cable_data_.value_or(std::vector<CableDiscoveryData>()),
++            qr_generator_key_, cable_pairing_callback_);
+       }
+       return nullptr;
+     case FidoTransportProtocol::kNearFieldCommunication:
+@@ -85,14 +78,14 @@ std::unique_ptr<FidoDiscoveryBase> FidoDiscoveryFactory::Create(
+ void FidoDiscoveryFactory::set_cable_data(
+     std::vector<CableDiscoveryData> cable_data,
+     base::Optional<QRGeneratorKey> qr_generator_key) {
+-  request_state_.cable_data_ = std::move(cable_data);
+-  request_state_.qr_generator_key_ = std::move(qr_generator_key);
++  cable_data_ = std::move(cable_data);
++  qr_generator_key_ = std::move(qr_generator_key);
+ }
+ 
+ void FidoDiscoveryFactory::set_cable_pairing_callback(
+     base::RepeatingCallback<void(std::unique_ptr<CableDiscoveryData>)>
+         pairing_callback) {
+-  request_state_.cable_pairing_callback_.emplace(std::move(pairing_callback));
++  cable_pairing_callback_.emplace(std::move(pairing_callback));
+ }
+ 
+ #if defined(OS_WIN)
+@@ -137,7 +130,4 @@ FidoDiscoveryFactory::MaybeCreatePlatformDiscovery() const {
+ }
+ #endif
+ 
+-FidoDiscoveryFactory::RequestState::RequestState() = default;
+-FidoDiscoveryFactory::RequestState::~RequestState() = default;
+-
+ }  // namespace device
+diff --git a/device/fido/fido_discovery_factory.h b/device/fido/fido_discovery_factory.h
+index e8265dfe746b4..7a22bd5e4b588 100644
+--- a/device/fido/fido_discovery_factory.h
++++ b/device/fido/fido_discovery_factory.h
+@@ -34,18 +34,6 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoDiscoveryFactory {
+   FidoDiscoveryFactory();
+   virtual ~FidoDiscoveryFactory();
+ 
+-  // Resets all fields that are only meaningful for the duration of a single
+-  // request to a safe default.
+-  //
+-  // The "regular" FidoDiscoveryFactory is owned by the
+-  // AuthenticatorClientRequestDelegate and lives only for a single request.
+-  // Instances returned from
+-  // AuthenticatorEnvironmentImpl::GetDiscoveryFactoryOverride(), which are
+-  // used in unit tests or by the WebDriver virtual authenticators, are
+-  // long-lived and may handle multiple WebAuthn requests. Hence, they will be
+-  // reset at the beginning of each new request.
+-  void ResetRequestState();
+-
+   // Instantiates a FidoDiscoveryBase for the given transport.
+   //
+   // FidoTransportProtocol::kUsbHumanInterfaceDevice is not valid on Android.
+@@ -83,26 +71,18 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoDiscoveryFactory {
+ #endif  // defined(OS_WIN)
+ 
+  private:
+-  // RequestState holds configuration data that is only meaningful for a
+-  // single WebAuthn request.
+-  struct RequestState {
+-    RequestState();
+-    ~RequestState();
+-    base::Optional<std::vector<CableDiscoveryData>> cable_data_;
+-    base::Optional<QRGeneratorKey> qr_generator_key_;
+-    base::Optional<
+-        base::RepeatingCallback<void(std::unique_ptr<CableDiscoveryData>)>>
+-        cable_pairing_callback_;
+-  };
+-
+ #if defined(OS_MACOSX) || defined(OS_CHROMEOS)
+   std::unique_ptr<FidoDiscoveryBase> MaybeCreatePlatformDiscovery() const;
+ #endif
+ 
+-  RequestState request_state_;
+ #if defined(OS_MACOSX)
+   base::Optional<fido::mac::AuthenticatorConfig> mac_touch_id_config_;
+ #endif  // defined(OS_MACOSX)
++  base::Optional<std::vector<CableDiscoveryData>> cable_data_;
++  base::Optional<QRGeneratorKey> qr_generator_key_;
++  base::Optional<
++      base::RepeatingCallback<void(std::unique_ptr<CableDiscoveryData>)>>
++      cable_pairing_callback_;
+ #if defined(OS_WIN)
+   WinWebAuthnApi* win_webauthn_api_ = nullptr;
+ #endif  // defined(OS_WIN)
